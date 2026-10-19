@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name: Convertfy
-GenericName: File converter
+Name=Convertfy
+GenericName=File converter
 Comment=Convert and edit files: start dragging a file and press Shift
 Exec=convertfy %F
 Icon=convertfy
