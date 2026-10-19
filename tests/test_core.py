@@ -100,3 +100,12 @@ def test_paths(tmp_path):
     f.write_bytes(b"x")
     assert sibling(f, ext=".jpg").name == "a (1).jpg"
     assert category("x.HEIC") == "image" and category("x.pdf") == "pdf" and category("x.zip") is None
+
+
+def test_watcher_desktop_filter():
+    from PySide6.QtCore import QPoint
+    from convertfy.trigger import ConvertfyWatcher
+    watcher = ConvertfyWatcher(lambda: False, lambda: False)
+    # Calling the detection at (10, 10) must return a boolean without error
+    result = watcher._is_desktop_or_file_manager(QPoint(10, 10))
+    assert isinstance(result, bool)

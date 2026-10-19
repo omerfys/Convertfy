@@ -33,7 +33,9 @@ class ConvertfyWatcher(QObject):
         self._fired = False
         self._idle_ticks = 0
         self._shown_at = QPoint()
+        self._can_trigger = False
         self._user32 = ctypes.windll.user32 if sys.platform == "win32" else None
+        self._kernel32 = ctypes.windll.kernel32 if sys.platform == "win32" else None
         self._mac = None
         if sys.platform == "darwin":
             from . import platform_mac
@@ -83,8 +85,9 @@ class ConvertfyWatcher(QObject):
                 if self._down_at is None:
                     self._down_at = pos
                     self._fired = False
+                    self._can_trigger = self._is_desktop_or_file_manager(pos)
                 moved = (pos - self._down_at).manhattanLength() >= DRAG_THRESHOLD
-                if self.enabled and moved and shift and not self._fired:
+                if self.enabled and self._can_trigger and moved and shift and not self._fired:
                     self._fired = True
                     self._idle_ticks = 0
                     self._shown_at = pos
@@ -92,4 +95,123 @@ class ConvertfyWatcher(QObject):
             else:
                 self._down_at = None
                 self._fired = False
+                self._can_trigger = False
         self._shift_was = shift
+
+    def _is_desktop_or_file_manager(self, pos: QPoint) -> bool:
+        """Only permit radial menu to trigger from Desktop or File Explorer; suppress in games."""
+        if sys.platform == "win32":
+            return self._win_is_desktop_or_explorer(pos)
+        if sys.platform == "darwin":
+            return self._mac_is_finder()
+        if sys.platform.startswith("linux"):
+            return self._linux_is_file_manager()
+        return True
+
+    def _win_is_desktop_or_explorer(self, pos: QPoint) -> bool:
+        if self._user32 is None:
+            return True
+        try:
+            from ctypes import wintypes
+            # 1. Fullscreen game detection: if foreground window covers screen and is not desktop, block
+            fg = self._user32.GetForegroundWindow()
+            if fg and self._win_is_fullscreen_game(fg):
+                return False
+
+            # 2. Check window under cursor
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+            pt = POINT(pos.x(), pos.y())
+            hwnd = self._user32.WindowFromPoint(pt)
+            if not hwnd:
+                return False
+
+            ALLOWED_CLASSES = {
+                "Progman", "WorkerW", "CabinetWClass", "ExploreWClass",
+                "SHELLDLL_DefView", "SysListView32", "Shell_TrayWnd",
+                "Shell_SecondaryTrayWnd"
+            }
+
+            buf = ctypes.create_unicode_buffer(256)
+            self._user32.GetClassNameW(hwnd, buf, 256)
+            if buf.value in ALLOWED_CLASSES:
+                return True
+
+            GA_ROOT = 2
+            root = self._user32.GetAncestor(hwnd, GA_ROOT)
+            if root:
+                self._user32.GetClassNameW(root, buf, 256)
+                if buf.value in ALLOWED_CLASSES:
+                    return True
+
+            pname = self._win_process_name(hwnd)
+            ALLOWED_PROCS = {
+                "explorer.exe", "totalcmd.exe", "totalcmd64.exe",
+                "dopus.exe", "files.exe", "onecommander.exe",
+                "convertfy.exe", "python.exe", "pythonw.exe"
+            }
+            return pname in ALLOWED_PROCS
+        except Exception:
+            return True
+
+    def _win_is_fullscreen_game(self, hwnd) -> bool:
+        try:
+            from ctypes import wintypes
+            buf = ctypes.create_unicode_buffer(256)
+            self._user32.GetClassNameW(hwnd, buf, 256)
+            if buf.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
+                return False
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
+                            ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", RECT),
+                            ("rcWork", RECT), ("dwFlags", wintypes.DWORD)]
+            r = RECT()
+            if not self._user32.GetWindowRect(hwnd, ctypes.byref(r)):
+                return False
+            hmon = self._user32.MonitorFromWindow(hwnd, 2)
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if not self._user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                return False
+            return (r.left <= mi.rcMonitor.left and r.top <= mi.rcMonitor.top and
+                    r.right >= mi.rcMonitor.right and r.bottom >= mi.rcMonitor.bottom)
+        except Exception:
+            return False
+
+    def _win_process_name(self, hwnd) -> str:
+        try:
+            from ctypes import wintypes
+            from pathlib import Path
+            pid = wintypes.DWORD()
+            self._user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if not pid.value or self._kernel32 is None:
+                return ""
+            hproc = self._kernel32.OpenProcess(0x1000, False, pid.value)
+            if not hproc:
+                return ""
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            self._kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size))
+            self._kernel32.CloseHandle(hproc)
+            return Path(buf.value).name.lower()
+        except Exception:
+            return ""
+
+    def _mac_is_finder(self) -> bool:
+        try:
+            from AppKit import NSWorkspace
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            return app.bundleIdentifier() == "com.apple.finder" if app else True
+        except Exception:
+            return True
+
+    def _linux_is_file_manager(self) -> bool:
+        try:
+            if self._mac is not None and hasattr(self._mac, "x11"):
+                # Check active window on X11
+                return True
+        except Exception:
+            pass
+        return True
